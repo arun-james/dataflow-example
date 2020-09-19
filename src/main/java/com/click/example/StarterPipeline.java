@@ -20,11 +20,11 @@ package com.click.example;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.options.*;
-import org.apache.beam.sdk.io.redis.RedisIO;
+import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
-import org.apache.beam.sdk.values.KV;
-import org.apache.beam.sdk.values.PCollection;
+import org.apache.beam.sdk.transforms.SerializableFunction;
+import org.apache.beam.sdk.values.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -45,160 +45,119 @@ import org.slf4j.LoggerFactory;
  *   --runner=DataflowRunner
  */
 public class StarterPipeline {
-//  private static final Logger LOG = LoggerFactory.getLogger(StarterPipeline.class);
+  private static final Logger LOG = LoggerFactory.getLogger(StarterPipeline.class);
 
-    public static interface WordCountOptions extends PipelineOptions {
+    public static interface FileParserOptions extends PipelineOptions {
         @Description("Path of the file to read from")
-        @Default.String("gs://data-flow-temp-bkt/inbound/redisfile.txt")
-        String getInputFile();
-        void setInputFile(String value);
-
-        @Description("Path of the file to write to")
-        @Default.String("gs://data-flow-temp-bkt/queries.txt")
-        String getOutput();
-        void setOutput(String value);
-
-        @Description("redis host")
-        @Default.String("127.0.0.1")
-        String getRedisHost();
-        void setRedisHost(String value);
-
-        @Description("redis port")
-        @Default.Integer(6379)
-        Integer getRedisPort();
-        void setRedisPort(Integer value);
-
+        ValueProvider<String> getInputFile();
+        void setInputFile(ValueProvider<String> value);
     }
 
   public static void main(String[] args) {
 
-      WordCountOptions options = PipelineOptionsFactory.fromArgs(args).withValidation()
-              .as(WordCountOptions.class);
+      FileParserOptions options = PipelineOptionsFactory.fromArgs(args).withValidation()
+              .as(FileParserOptions.class);
 
     Pipeline p = Pipeline.create(options);
-//        PipelineOptionsFactory.fromArgs(args).withValidation().create());
 
-    PCollection<String[]> recordSet = p.apply(
-        "ReadLines", TextIO.read().from(options.getInputFile())).apply(
-        "Transform Record",                     // the transform name
-        ParDo.of(new DoFn<String, String[]>() {    // a DoFn as an anonymous inner class instance
+      PCollection<String> records = p.apply(
+              "ReadLines", TextIO.read().from(ValueProvider.NestedValueProvider.of(
+                      options.getInputFile(),
+                      (SerializableFunction<String, String>) file -> file)));
 
-            private final Logger LOG = LoggerFactory.getLogger(StarterPipeline.class);
+      final TupleTag<String> validRecord =
+              new TupleTag<String>(){};
 
-            @ProcessElement
-            public void processElement(@Element String line, OutputReceiver<String[]> out) {
-                LOG.info("line content: "+line);
-                String[] fields = line.split("\\|");
-                out.output(fields);
+      final TupleTag<String> errorRecord =
+              new TupleTag<String>(){};
+
+      records.apply("Record Counter", Count.globally())
+              .apply("Logging Count", ParDo.of(new DoFn<Long, Void>() {
+                  @ProcessElement
+                  public void processElement(@Element Long count) {
+                      LOG.error("Total Records Processed: "+count);
+                  }
+              }));
+
+      PCollectionTuple validatedRecords = records.apply(
+        "Validating Records",
+        ParDo.of(new DoFn<String, String>() {
+
+            private Boolean isBlank(String value) {
+                return (value == null || value.isBlank());
             }
-        }));
-    recordSet.apply(
-        "Processing Record",                     // the transform name
-        ParDo.of(new DoFn<String[], KV<String, String>>() {    // a DoFn as an anonymous inner class instance
 
-            private final Logger LOG = LoggerFactory.getLogger(StarterPipeline.class);
-
-            @ProcessElement
-            public void processElement(@Element String[] fields, OutputReceiver<KV<String, String>> out) {
-                String guid = null;
-                String firstName = null;
-                String lastName = null;
-                String dob = null;
-                String postalCode = null;
-                for(String field : fields) {
-                    LOG.info("field content: "+field.toString());
-                    String[] fieldKeyValue = field.split(":");
-                    if(fieldKeyValue.length == 2) {
-                        String key = fieldKeyValue[0].trim().toLowerCase();
-                        String value = fieldKeyValue[1].trim().toLowerCase();
-                        if(key.equals("guid")) {
-                            guid = value;
-                            LOG.info("found guid: "+guid);
-                        } else if(key.equals("firstname")) {
-                            firstName = value;
-                            LOG.info("found firstName: "+firstName);
-                        } else if(key.equals("lastname")) {
-                            lastName = value;
-                            LOG.info("found lastName: "+lastName);
-                        } else if(key.equals("dob")) {
-                            dob = value;
-                            LOG.info("found dob: "+dob);
-                        } else if(key.equals("postalcode")) {
-                            postalCode = value;
-                            LOG.info("found postalCode: "+postalCode);
+            private Boolean isRecordValid(String recordLine) {
+                if (isBlank(recordLine)) {
+                    return false;
+                }
+                String[] fields = recordLine.split("\\|");
+                Boolean isRecordDirty = false;
+                StringBuilder errorMessageBuilder = new StringBuilder(recordLine);
+                errorMessageBuilder.append(" : has errors ");
+                if(fields!=null && fields.length > 0) {
+                    for (String field : fields) {
+                        if(isBlank(field)) {
+                            isRecordDirty = true;
+                            errorMessageBuilder.append("| Found Empty element; ");
+                        } else {
+                            String[] fieldKeyValue = field.split(":");
+                            if (fieldKeyValue.length == 2) {
+                                String key = fieldKeyValue[0];
+                                String value = fieldKeyValue[1];
+                                if (isBlank(key)) {
+                                    isRecordDirty = true;
+                                    errorMessageBuilder.append("| Key is blank; ");
+                                } else if (isBlank(value)) {
+                                    isRecordDirty = true;
+                                    errorMessageBuilder.append("| value for " + key + " cannot be blank.; ");
+                                }
+                            } else {
+                                isRecordDirty = true;
+                                errorMessageBuilder.append("| Found Empty field; ");
+                            }
                         }
                     }
                 }
+                if(isRecordDirty) {
+                    LOG.error(errorMessageBuilder.toString());
+                }
+                return !isRecordDirty;
+            }
 
-
-                if(guid!=null) {
-//                    out.output("sadd firstname:".concat(firstName).concat(" ").concat(guid));
-//                    out.output("sadd lastname:".concat(lastName).concat(" ").concat(guid));
-//                    out.output("sadd dob:".concat(dob).concat(" ").concat(guid));
-//                    out.output("sadd postalcode:".concat(postalCode).concat(" ").concat(guid));
-                    out.output(KV.of("firstname:".concat(firstName), guid));
-                    out.output(KV.of("lastname:".concat(lastName), guid));
-                    out.output(KV.of("dob:".concat(dob), guid));
-                    out.output(KV.of("postalcode:".concat(postalCode), guid));
+            @ProcessElement
+            public void processElement(@Element String line, MultiOutputReceiver out) {
+                if(isRecordValid(line)) {
+                    out.get(validRecord).output(line);
+                } else {
+                    out.get(errorRecord).output(line);
                 }
             }
-        })).apply("Writing field indexes into redis",
-            RedisIO.write().withMethod(RedisIO.Write.Method.SADD)
-                    .withEndpoint(options.getRedisHost(), options.getRedisPort()));
-//            .apply(TextIO.write().to(options.getOutput()));;
+        }).withOutputTags(validRecord, TupleTagList.of(errorRecord)));
 
+      PCollection<String> validRecords = validatedRecords.get(validRecord);
+      PCollection<String> errorRecords = validatedRecords.get(errorRecord);
 
-// command to execute
-//      mvn compile exec:java -e -Dexec.mainClass=com.click.example.StarterPipeline -Dexec.args="--project=stack-driver-testing-282612 --stagingLocation=gs://data-flow-temp-bkt/staging/ --tempLocation=gs://data-flow-temp-bkt/tmp/ --runner=DataflowRunner --output=gs://data-flow-temp-bkt/"
-
-    // p.apply(Create.of("Hello", "World"))
-    // .apply(MapElements.via(new SimpleFunction<String, String>() {
-    //   @Override
-    //   public String apply(String input) {
-    //     return input.toUpperCase();
-    //   }
-    // }))
-    // .apply(ParDo.of(new DoFn<String, Void>() {
-    //   @ProcessElement
-    //   public void processElement(ProcessContext c)  {
-    //     LOG.info(c.element());
-    //   }
-    // }));
-
-      recordSet.apply(
-              "Processing Payroll Provider ID",                     // the transform name
-              ParDo.of(new DoFn<String[], KV<String, KV<String, String>>>() {    // a DoFn as an anonymous inner class instance
-
-                  private final Logger LOG = LoggerFactory.getLogger(StarterPipeline.class);
-
+      errorRecords.apply("Record Counter", Count.globally())
+              .apply("Logging Count", ParDo.of(new DoFn<Long, Void>() {
                   @ProcessElement
-                  public void processElement(@Element String[] fields,
-                                             OutputReceiver<KV<String, KV<String, String>>> out) {
-                      String guid = null;
-                      String ppid = null;
-                      for(String field : fields) {
-                          LOG.info("field content: "+field.toString());
-                          String[] fieldKeyValue = field.split(":");
-                          if(fieldKeyValue.length == 2) {
-                              String key = fieldKeyValue[0].trim().toLowerCase();
-                              String value = fieldKeyValue[1].trim().toLowerCase();
-                              if(key.equals("guid")) {
-                                  guid = value;
-                                  LOG.info("found guid: "+guid);
-                              } else if(key.equals("pid")) {
-                                  ppid = value;
-                                  LOG.info("payroll provider: "+ppid);
-                              }
-                          }
-                      }
-
-                      if(guid!=null && ppid!=null) {
-                          out.output(KV.of("hash11:".concat(guid), KV.of("hash12", ppid)));
-                          LOG.info("Created the hash...");
+                  public void processElement(@Element Long count) {
+                      if(count!=null && count > 0) {
+                          LOG.error("Total Invalid Records : " + count);
+                      } else {
+                          LOG.error("No Invalid Records :");
                       }
                   }
-              })).apply("Writing Hash Data into Redis",
-              ParDo.of(new CustomRedisIODoFun(options.getRedisHost(), options.getRedisPort())));
+              }));
+
+      validRecords.apply("TransForm Records",ParDo.of(new DoFn<String, String[]>() {
+          @ProcessElement
+          public void processElement(@Element String line, OutputReceiver<String[]> out) {
+              LOG.info("line content: "+line);
+              out.output(line.split("\\|"));
+          }
+
+      }));
 
     p.run();
   }

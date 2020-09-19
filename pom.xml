@@ -27,7 +27,10 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven-compiler-plugin.version>3.7.0</maven-compiler-plugin.version>
     <exec-maven-plugin.version>1.6.0</exec-maven-plugin.version>
+    <maven-jar-plugin.version>3.2.0</maven-jar-plugin.version>
+    <maven-shade-plugin.version>3.2.4</maven-shade-plugin.version>
     <slf4j.version>1.7.25</slf4j.version>
+    <beam.version>2.22.0</beam.version>
   </properties>
 
   <repositories>
@@ -51,10 +54,59 @@
         <artifactId>maven-compiler-plugin</artifactId>
         <version>${maven-compiler-plugin.version}</version>
         <configuration>
-          <source>1.8</source>
-          <target>1.8</target>
+          <source>11</source>
+          <target>11</target>
+          <release>11</release>
         </configuration>
       </plugin>
+     <plugin>
+       <groupId>org.apache.maven.plugins</groupId>
+       <artifactId>maven-jar-plugin</artifactId>
+       <version>${maven-jar-plugin.version}</version>
+       <configuration>
+         <archive>
+           <manifest>
+             <addClasspath>true</addClasspath>
+             <classpathPrefix>lib/</classpathPrefix>
+             <mainClass>com.click.example.StarterPipeline</mainClass>
+           </manifest>
+         </archive>
+       </configuration>
+     </plugin>
+     <!--
+        Configures `mvn package` to produce a bundled jar ("fat jar") for runners
+        that require this for job submission to a cluster.
+      -->
+     <plugin>
+       <groupId>org.apache.maven.plugins</groupId>
+       <artifactId>maven-shade-plugin</artifactId>
+       <version>${maven-shade-plugin.version}</version>
+       <executions>
+         <execution>
+           <phase>package</phase>
+           <goals>
+             <goal>shade</goal>
+           </goals>
+           <configuration>
+             <finalName>${project.artifactId}-bundled-${project.version}</finalName>
+             <filters>
+               <filter>
+                 <artifact>*:*</artifact>
+                 <excludes>
+                   <exclude>META-INF/LICENSE</exclude>
+                   <exclude>META-INF/*.SF</exclude>
+                   <exclude>META-INF/*.DSA</exclude>
+                   <exclude>META-INF/*.RSA</exclude>
+                 </excludes>
+               </filter>
+             </filters>
+             <transformers>
+               <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+             </transformers>
+           </configuration>
+         </execution>
+       </executions>
+     </plugin>
     </plugins>
 
     <pluginManagement>
@@ -72,17 +124,38 @@
   </build>
 
   <dependencies>
-    <dependency>
-      <groupId>com.google.cloud.dataflow</groupId>
-      <artifactId>google-cloud-dataflow-java-sdk-all</artifactId>
-      <version>2.5.0</version>
-    </dependency>
-
-    <!-- https://mvnrepository.com/artifact/org.apache.beam/beam-sdks-java-io-redis -->
+    <!-- Apache Beam
+      To run on another of the Beam runners, add its module to this pom.xml
+      according to the runner-specific setup instructions on the Beam website:
+        http://beam.apache.org/documentation/#runners
+    -->
     <dependency>
       <groupId>org.apache.beam</groupId>
-      <artifactId>beam-sdks-java-io-redis</artifactId>
-      <version>2.23.0</version>
+      <artifactId>beam-sdks-java-core</artifactId>
+      <version>${beam.version}</version>
+    </dependency>
+
+    <!-- Direct Runner -->
+    <dependency>
+      <groupId>org.apache.beam</groupId>
+      <artifactId>beam-runners-direct-java</artifactId>
+      <version>${beam.version}</version>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!-- Dataflow Runner -->
+    <dependency>
+      <groupId>org.apache.beam</groupId>
+      <artifactId>beam-runners-google-cloud-dataflow-java</artifactId>
+      <version>${beam.version}</version>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!-- Google Cloud I/O - BigQuery, Bigtable, Datastore, Pub/Sub, Spanner -->
+    <dependency>
+      <groupId>org.apache.beam</groupId>
+      <artifactId>beam-sdks-java-io-google-cloud-platform</artifactId>
+      <version>${beam.version}</version>
     </dependency>
 
     <!-- slf4j API frontend binding with JUL backend -->
